@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 
 /// Focuses the appropriate app for a Claude session based on its source.
 struct SessionFocuser {
@@ -19,9 +20,18 @@ struct SessionFocuser {
         case .zed:
             activateApp(bundleId: "dev.zed.Zed")
         case .claudeDesktop:
-            // No public deep link to select a specific code session, so the best
-            // we can do today is bring Claude Desktop to the front.
+            // Bring Claude Desktop to the front. There's no public deep link to
+            // select a specific code session, so when the user opts in (and has
+            // granted Accessibility), try to click the matching session via AX.
             activateApp(bundleId: "com.anthropic.claudefordesktop")
+            let axEnabled = UserDefaults(suiteName: "group.com.poisonpenllc.Claude-Status")?
+                .bool(forKey: "axJumpEnabled") ?? false
+            if axEnabled, let title = session.desktopTitle, !title.isEmpty {
+                // Small delay so the window is frontmost before we press.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    AXSessionJumper.jump(toTitle: title)
+                }
+            }
         }
     }
 
@@ -275,5 +285,141 @@ struct SessionFocuser {
         guard let script = NSAppleScript(source: source) else { return }
         var error: NSDictionary?
         script.executeAndReturnError(&error)
+    }
+}
+
+// MARK: - Accessibility-based session jump (opt-in)
+
+/// Uses the Accessibility API to click the Claude Desktop session whose title
+/// matches `desktopTitle`. Requires the user to grant Accessibility permission
+/// to Claude Status and to enable the feature in Settings.
+///
+/// Best-effort and intentionally narrow: it only inspects Claude Desktop's own
+/// element tree and only performs an AXPress on a title-matching element.
+/// Writes a debug trace to `/tmp/claude-status-ax.log` to aid tuning.
+enum AXSessionJumper {
+    static let desktopBundleId = "com.anthropic.claudefordesktop"
+    private static let logPath = "/tmp/claude-status-ax.log"
+
+    /// Triggers the standard macOS "control this computer" prompt and registers
+    /// the app with TCC. Call when the user opts in — far more reliable than
+    /// manually adding the app in System Settings.
+    static func ensureTrusted() {
+        let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(opts)
+        log("ensureTrusted() -> AXIsProcessTrusted=\(trusted)")
+    }
+
+    static func jump(toTitle title: String) {
+        guard !normalize(title).isEmpty else { return }
+        guard let app = NSRunningApplication
+            .runningApplications(withBundleIdentifier: desktopBundleId).first else {
+            log("Claude Desktop not running (trusted=\(AXIsProcessTrusted()))")
+            return
+        }
+
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        // Electron/Chromium only exposes its web-content AX tree (the session
+        // list) once a client sets these. Native menus are visible without it.
+        AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+
+        if attempt(axApp, title: title) { return }
+        // The web tree builds asynchronously after enabling AX — retry shortly.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            _ = attempt(axApp, title: title)
+        }
+    }
+
+    @discardableResult
+    private static func attempt(_ axApp: AXUIElement, title: String) -> Bool {
+        let target = normalize(title)
+        var matches: [AXUIElement] = []
+        var sample: [String] = []
+        search(axApp, target: target, depth: 0, matches: &matches, sample: &sample)
+
+        if matches.isEmpty {
+            log("NO MATCH for \"\(title)\" (trusted=\(AXIsProcessTrusted())). \(sample.count) texts sampled:\n"
+                + sample.prefix(120).map { "  • \($0)" }.joined(separator: "\n"))
+            return false
+        }
+        for el in matches where press(el) {
+            log("PRESSED \"\(title)\" (\(matches.count) candidate(s))")
+            return true
+        }
+        log("FOUND \(matches.count) match(es) for \"\(title)\" but none pressable")
+        return false
+    }
+
+    // MARK: Tree walking
+
+    private static func search(_ el: AXUIElement, target: String, depth: Int,
+                               matches: inout [AXUIElement], sample: inout [String]) {
+        if depth > 60 { return }
+        if let t = text(of: el) {
+            let n = normalize(t)
+            if !n.isEmpty {
+                if sample.count < 250 { sample.append(t) }
+                let fuzzy = n.count > 6 && target.count > 6 && (n.contains(target) || target.contains(n))
+                if n == target || fuzzy { matches.append(el) }
+            }
+        }
+        for child in children(of: el) {
+            search(child, target: target, depth: depth + 1, matches: &matches, sample: &sample)
+        }
+    }
+
+    private static func children(of el: AXUIElement) -> [AXUIElement] {
+        copy(el, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    }
+
+    private static func parent(of el: AXUIElement) -> AXUIElement? {
+        guard let p = copy(el, kAXParentAttribute), CFGetTypeID(p) == AXUIElementGetTypeID() else { return nil }
+        return (p as! AXUIElement)
+    }
+
+    private static func text(of el: AXUIElement) -> String? {
+        for attr in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+            if let v = copy(el, attr) as? String, !v.isEmpty { return v }
+        }
+        return nil
+    }
+
+    private static func copy(_ el: AXUIElement, _ attr: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, attr as CFString, &value) == .success else { return nil }
+        return value
+    }
+
+    private static func press(_ el: AXUIElement) -> Bool {
+        var node: AXUIElement? = el
+        var hops = 0
+        while let n = node, hops < 6 {
+            var names: CFArray?
+            if AXUIElementCopyActionNames(n, &names) == .success,
+               let actions = names as? [String], actions.contains(kAXPressAction as String),
+               AXUIElementPerformAction(n, kAXPressAction as CFString) == .success {
+                return true
+            }
+            node = parent(of: n)
+            hops += 1
+        }
+        return false
+    }
+
+    private static func normalize(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func log(_ msg: String) {
+        let line = "[\(Date())] \(msg)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let fh = FileHandle(forWritingAtPath: logPath) {
+            fh.seekToEndOfFile()
+            fh.write(data)
+            try? fh.close()
+        } else {
+            try? line.write(toFile: logPath, atomically: true, encoding: .utf8)
+        }
     }
 }

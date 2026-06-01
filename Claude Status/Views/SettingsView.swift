@@ -11,6 +11,8 @@ struct SettingsView: View {
 
     @AppStorage("iconStyle", store: UserDefaults(suiteName: "group.com.poisonpenllc.Claude-Status"))
     private var iconStyle: SessionIconStyle = .emoji
+    @AppStorage("axJumpEnabled", store: UserDefaults(suiteName: "group.com.poisonpenllc.Claude-Status"))
+    private var axJumpEnabled: Bool = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
@@ -29,6 +31,22 @@ struct SettingsView: View {
                     .onChange(of: launchAtLogin) { _, newValue in
                         toggleLaunchAtLogin(newValue)
                     }
+            }
+
+            Section("Claude Desktop") {
+                Toggle(isOn: $axJumpEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Jump to the exact session")
+                            .font(.body)
+                        Text("When you click a Claude Desktop session, use Accessibility to open that exact session (not just bring the app forward). Requires granting Accessibility permission to Claude Status in System Settings → Privacy & Security → Accessibility.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .onChange(of: axJumpEnabled) { _, on in
+                    if on { AXSessionJumper.ensureTrusted() }
+                }
             }
 
             if let updater {
