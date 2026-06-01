@@ -87,7 +87,7 @@ struct SessionRowView: View {
             VStack(alignment: .trailing, spacing: 1) {
                 Text(attentionLevel.label)
                     .font(.system(size: 11))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(attentionLevel == .hardBlock ? Color.red : Color.primary)
                 Text(session.timeSinceActivity)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -112,17 +112,9 @@ struct SessionRowView: View {
             Text(attentionLevel.emoji)
                 .font(.system(size: 14))
         case .dots:
-            ZStack {
-                Circle()
-                    .fill(dotColor)
-                    .frame(width: 8, height: 8)
-                // Hard block: solid red core inside the orange dot.
-                if attentionLevel == .hardBlock {
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: 4, height: 4)
-                }
-            }
+            Circle()
+                .fill(dotColor)
+                .frame(width: 8, height: 8)
         }
     }
 
@@ -135,7 +127,8 @@ struct SessionRowView: View {
     private var dotColor: Color {
         switch attentionLevel {
         case .working: .green
-        case .needsYou, .hardBlock: .orange
+        case .needsYou: .orange
+        case .hardBlock: .red    // solid red — clearly distinct from needsYou orange
         case .dormant: .gray
         }
     }

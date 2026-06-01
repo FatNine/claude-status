@@ -214,6 +214,10 @@ struct ClaudeSession: Identifiable, Codable, Equatable {
 }
 
 extension ClaudeSession {
+    /// Tool activities that block on user input — the daemon marks these
+    /// `active`, but they actually mean "your turn".
+    static let inputBlockingActivities: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+
     /// Derives the attention level from the raw state, how long since the last
     /// activity, and whether the user has acknowledged this session.
     ///
@@ -231,6 +235,10 @@ extension ClaudeSession {
     func attentionLevel(now: Date = Date(), acknowledgedAt: Date?, graceMinutes: Double) -> AttentionLevel {
         switch state {
         case .active, .compacting:
+            // Some "tools" actually block waiting for the user (AskUserQuestion,
+            // plan approval). The daemon reports them as active since it just
+            // sees a tool_use, but they need you — surface as a hard block.
+            if Self.inputBlockingActivities.contains(activity) { return .hardBlock }
             return .working
         case .waiting:
             return .hardBlock
