@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
-    private let monitor = SessionMonitor()
+    private let monitor = SessionMonitor(scanInterval: 2.0)
     private let focuser = SessionFocuser()
     private let pluginInstaller = PluginInstaller()
     private var eventMonitor: Any?
