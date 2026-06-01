@@ -75,6 +75,59 @@ enum SessionState: Comparable, Codable {
     }
 }
 
+/// What the user should do, derived from the raw `SessionState` plus timing and
+/// whether the user has already acknowledged the session.
+///
+/// This is the "attention router" layer: the menu-bar / row color is driven by
+/// this, not by the raw state directly. The raw daemon state is reinterpreted
+/// app-side, so no plugin (Rust) change is needed.
+enum AttentionLevel: Equatable {
+    /// Default minutes a finished turn stays "your turn" before fading to idle.
+    /// Shared by the app and the widget so they agree.
+    static let defaultGraceMinutes: Double = 60
+
+    /// Claude is busy on its own (active or compacting) — you're free to step away.
+    case working
+    /// A turn just finished and it's your move (review / continue). Soft.
+    case needsYou
+    /// Claude is blocked awaiting you (permission / question / elicitation). Hard.
+    case hardBlock
+    /// Truly idle: acknowledged, or no recent activity. Nothing to do.
+    case dormant
+
+    /// Aggregate priority for the menu-bar dot (higher = surfaced first).
+    /// hardBlock > needsYou > working > dormant — so a session that needs you
+    /// is never hidden behind one that is merely working.
+    var priority: Int {
+        switch self {
+        case .hardBlock: 3
+        case .needsYou: 2
+        case .working: 1
+        case .dormant: 0
+        }
+    }
+
+    /// Emoji used in the menu bar's "emoji" icon style.
+    var emoji: String {
+        switch self {
+        case .working: "\u{26A1}"   // ⚡
+        case .needsYou: "\u{1F440}" // 👀
+        case .hardBlock: "\u{23F3}" // ⏳
+        case .dormant: "\u{1F4A4}"  // 💤
+        }
+    }
+
+    /// Short label shown in the popover row.
+    var label: String {
+        switch self {
+        case .working: "Working"
+        case .needsYou: "Your turn"
+        case .hardBlock: "Needs input"
+        case .dormant: "Idle"
+        }
+    }
+}
+
 /// Where a Claude session is running.
 enum SessionSource: Codable, Equatable {
     case terminal(app: String)  // e.g. "iTerm2", "Terminal", "Ghostty"
@@ -82,6 +135,7 @@ enum SessionSource: Codable, Equatable {
     case vscode
     case jetbrains(ide: String)  // e.g. "PyCharm", "IntelliJ IDEA"
     case zed
+    case claudeDesktop  // Claude Desktop's built-in code mode (embedded claude-code)
 
     var label: String {
         switch self {
@@ -90,6 +144,7 @@ enum SessionSource: Codable, Equatable {
         case .vscode: "VS Code"
         case .jetbrains(let ide): ide
         case .zed: "Zed"
+        case .claudeDesktop: "Claude"
         }
     }
 
@@ -151,6 +206,39 @@ struct ClaudeSession: Identifiable, Codable, Equatable {
         components.host = "session"
         components.path = "/\(id)"
         return components.url ?? URL(string: "claude-status://session/unknown")!
+    }
+}
+
+extension ClaudeSession {
+    /// Derives the attention level from the raw state, how long since the last
+    /// activity, and whether the user has acknowledged this session.
+    ///
+    /// - `active` / `compacting` → `.working` (compacting folds into working).
+    /// - `waiting` → `.hardBlock` (permission / question / elicitation).
+    /// - `idle` → `.needsYou` if it just finished and you haven't acknowledged it;
+    ///   `.dormant` once acknowledged or after `graceMinutes` with no new activity.
+    ///
+    /// - Parameters:
+    ///   - acknowledgedAt: the `lastActivityAt` value captured when the user last
+    ///     marked this session read. The session is dormant while this is at or
+    ///     after the current `lastActivityAt` (i.e. nothing new since you looked).
+    ///   - graceMinutes: how long a finished turn stays `.needsYou` before fading
+    ///     to `.dormant` (assume you've stepped away or already handled it).
+    func attentionLevel(now: Date = Date(), acknowledgedAt: Date?, graceMinutes: Double) -> AttentionLevel {
+        switch state {
+        case .active, .compacting:
+            return .working
+        case .waiting:
+            return .hardBlock
+        case .idle:
+            if let ack = acknowledgedAt, ack >= lastActivityAt {
+                return .dormant
+            }
+            if now.timeIntervalSince(lastActivityAt) <= graceMinutes * 60 {
+                return .needsYou
+            }
+            return .dormant
+        }
     }
 }
 

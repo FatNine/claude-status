@@ -17,6 +17,13 @@ enum SessionIconStyle: String, CaseIterable {
 struct SessionRowView: View {
     let session: ClaudeSession
     var iconStyle: SessionIconStyle = .emoji
+    /// The attention level driving this row's color, icon, and label.
+    var attentionLevel: AttentionLevel = .dormant
+    /// When several sessions share this display name, show `#pid` to tell them apart.
+    var showPidTag: Bool = false
+    /// Marks this session read. When non-nil and the level is `.needsYou`,
+    /// a ✓ button appears on hover.
+    var onAcknowledge: (() -> Void)?
 
     @State private var isHovered = false
 
@@ -42,6 +49,14 @@ struct SessionRowView: View {
                     Text(session.source.label)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
+                    if showPidTag {
+                        Text("\u{2022}")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.tertiary)
+                        Text("#\(session.pid)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
                     if !session.activity.isEmpty {
                         Text("\u{2022}")
                             .font(.system(size: 8))
@@ -55,8 +70,21 @@ struct SessionRowView: View {
 
             Spacer()
 
+            // Hover ✓ to mark a "your turn" session read (→ idle). Shown only on
+            // hover and only for needsYou, as its own hit target — so a normal row
+            // click still focuses the session and you can't dismiss by mistake.
+            if isHovered, attentionLevel == .needsYou, let onAcknowledge {
+                Button(action: onAcknowledge) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Mark read (set to idle)")
+            }
+
             VStack(alignment: .trailing, spacing: 1) {
-                Text(session.state.label)
+                Text(attentionLevel.label)
                     .font(.system(size: 11))
                     .foregroundStyle(.primary)
                 Text(session.timeSinceActivity)
@@ -80,21 +108,28 @@ struct SessionRowView: View {
     private var statusIndicator: some View {
         switch iconStyle {
         case .emoji:
-            Text(session.state.emoji)
+            Text(attentionLevel.emoji)
                 .font(.system(size: 14))
         case .dots:
-            Circle()
-                .fill(dotColor)
-                .frame(width: 8, height: 8)
+            ZStack {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 8, height: 8)
+                // Hard block: solid red core inside the orange dot.
+                if attentionLevel == .hardBlock {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 4, height: 4)
+                }
+            }
         }
     }
 
     private var dotColor: Color {
-        switch session.state {
-        case .active: .green
-        case .waiting: .orange
-        case .compacting: .blue
-        case .idle: .gray
+        switch attentionLevel {
+        case .working: .green
+        case .needsYou, .hardBlock: .orange
+        case .dormant: .gray
         }
     }
 }

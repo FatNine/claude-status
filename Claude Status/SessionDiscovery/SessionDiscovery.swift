@@ -177,10 +177,30 @@ struct SessionDiscovery {
 
     // MARK: - Session Assembly
 
+    /// Derives a readable project name from a working directory.
+    ///
+    /// Normally this is just the last path component. But sessions run inside a
+    /// git worktree have a cwd like `…/<repo>/.claude/worktrees/<codename>`, whose
+    /// last component is a meaningless auto-generated codename (e.g.
+    /// `hardcore-maxwell-facf05`). In that case use the repo name as the primary
+    /// label and append the worktree codename for disambiguation, e.g.
+    /// `claude-status · hardcore-maxwell-facf05`.
+    static func deriveProjectName(from cwd: String) -> String {
+        let marker = "/.claude/worktrees/"
+        if let range = cwd.range(of: marker) {
+            let repo = (String(cwd[..<range.lowerBound]) as NSString).lastPathComponent
+            let codename = cwd[range.upperBound...].split(separator: "/").first.map(String.init) ?? ""
+            if !repo.isEmpty {
+                return codename.isEmpty ? repo : "\(repo) \u{00B7} \(codename)"
+            }
+        }
+        return (cwd as NSString).lastPathComponent
+    }
+
     /// Builds a `ClaudeSession` from a validated `CStatusRecord`.
     private func assembleSession(from record: CStatusRecord) -> ClaudeSession {
         let source = classifySource(pid: record.pid, ppid: record.ppid)
-        let projectName = (record.cwd as NSString).lastPathComponent
+        let projectName = Self.deriveProjectName(from: record.cwd)
 
         let iTermSessionId: String?
         let tmuxPaneId: String?
@@ -244,6 +264,11 @@ struct SessionDiscovery {
     private func classifySource(pid: pid_t, ppid: pid_t) -> SessionSource {
         // Check the Claude process's own executable path for IDE-bundled binaries
         if let path = executablePath(for: pid) {
+            // Claude Desktop runs an embedded claude-code runtime under
+            // ~/Library/Application Support/Claude/claude-code/<ver>/claude.app
+            if path.contains("/Application Support/Claude/claude-code/") {
+                return .claudeDesktop
+            }
             if path.contains("/Developer/Xcode/CodingAssistant/") {
                 return .xcode
             }

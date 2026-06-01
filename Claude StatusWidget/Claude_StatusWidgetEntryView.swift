@@ -254,21 +254,33 @@ struct SessionRowWidget: View {
         // Default to emoji everywhere else — emoji shapes are more distinguishable
         // on the desktop where colors are desaturated.
         if renderingMode == .fullColor, iconStyle == "dots" {
-            Circle()
-                .fill(dotColor)
-                .frame(width: 8, height: 8)
+            ZStack {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 8, height: 8)
+                if level == .hardBlock {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 4, height: 4)
+                }
+            }
         } else {
-            Text(session.state.emoji)
+            Text(level.emoji)
                 .font(.system(size: 14))
         }
     }
 
+    /// Attention level derived from state + age. The widget has no access to the
+    /// app's in-memory acknowledgements, so it passes nil (time-decay only).
+    private var level: AttentionLevel {
+        session.attentionLevel(acknowledgedAt: nil, graceMinutes: AttentionLevel.defaultGraceMinutes)
+    }
+
     private var dotColor: Color {
-        switch session.state {
-        case .active: .green
-        case .waiting: .orange
-        case .compacting: .blue
-        case .idle: .gray
+        switch level {
+        case .working: .green
+        case .needsYou, .hardBlock: .orange
+        case .dormant: .gray
         }
     }
 }

@@ -18,6 +18,10 @@ struct SessionFocuser {
         
         case .zed:
             activateApp(bundleId: "dev.zed.Zed")
+        case .claudeDesktop:
+            // No public deep link to select a specific code session, so the best
+            // we can do today is bring Claude Desktop to the front.
+            activateApp(bundleId: "com.anthropic.claudefordesktop")
         }
     }
 

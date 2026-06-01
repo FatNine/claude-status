@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let sharedDefaults = UserDefaults(suiteName: "group.com.poisonpenllc.Claude-Status")
 
     /// Cached state for change detection in status icon updates.
-    private var lastRenderedState: SessionState?
+    private var lastRenderedLevel: AttentionLevel?
     private var lastRenderedHookMissing: Bool = false
     private var lastRenderedIconStyle: SessionIconStyle?
 
@@ -139,18 +139,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem.button else { return }
 
         let hookMissing = monitor.hookDetected == false
-        let aggregateState = monitor.aggregateState
+        let level = monitor.aggregateAttentionLevel
         let iconStyle = sharedDefaults.flatMap { defaults in
             defaults.string(forKey: "iconStyle").flatMap { SessionIconStyle(rawValue: $0) }
         } ?? .emoji
 
         // Skip redraw if nothing has changed
-        if aggregateState == lastRenderedState
+        if level == lastRenderedLevel
             && hookMissing == lastRenderedHookMissing
             && iconStyle == lastRenderedIconStyle {
             return
         }
-        lastRenderedState = aggregateState
+        lastRenderedLevel = level
         lastRenderedHookMissing = hookMissing
         lastRenderedIconStyle = iconStyle
 
@@ -166,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ) ?? NSImage()
         }
 
-        guard let state = aggregateState else {
+        guard let level else {
             // No sessions — just show the template icon
             baseIcon.isTemplate = true
             button.image = baseIcon
@@ -179,7 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Emoji mode: compose icon with emoji overlay in bottom-right
             let iconSize = baseIcon.size
             let emojiFont = NSFont.systemFont(ofSize: 12)
-            let emojiStr = state.emoji as NSString
+            let emojiStr = level.emoji as NSString
             let emojiAttrs: [NSAttributedString.Key: Any] = [.font: emojiFont]
             let emojiSize = emojiStr.size(withAttributes: emojiAttrs)
             let gap: CGFloat = 2
@@ -245,15 +245,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 context.fillEllipse(in: clearRect)
                 context.setBlendMode(.normal)
 
-                let dotColor: NSColor = switch state {
-                case .waiting: .systemOrange
-                case .active: .systemGreen
-                case .compacting: .systemBlue
-                case .idle: .systemGray
+                // Attention-router colors: working = green (Claude busy, you're free),
+                // needsYou / hardBlock = orange (your turn), dormant = gray.
+                let dotColor: NSColor = switch level {
+                case .working: .systemGreen
+                case .needsYou, .hardBlock: .systemOrange
+                case .dormant: .systemGray
                 }
 
                 dotColor.setFill()
                 NSBezierPath(ovalIn: dotRect).fill()
+
+                // Hard block (permission / question): solid red core inside the
+                // orange dot — "you must act to unblock Claude".
+                if level == .hardBlock {
+                    let coreInset = dotDiameter * 0.27
+                    NSColor.systemRed.setFill()
+                    NSBezierPath(ovalIn: dotRect.insetBy(dx: coreInset, dy: coreInset)).fill()
+                }
 
                 // Draw exclamation mark overlay when hook is missing
                 if hookMissing {
@@ -553,7 +562,9 @@ private struct PopoverContentView: View {
         SessionListView(
             sessions: monitor.sessions,
             productivityData: monitor.productivityData,
+            attentionLevel: { monitor.attentionLevel(for: $0) },
             onSessionTap: onSessionTap,
+            onAcknowledge: { monitor.acknowledge($0) },
             onRefresh: onRefresh,
             onSettings: onSettings,
             onQuit: onQuit

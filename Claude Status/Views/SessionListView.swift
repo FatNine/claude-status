@@ -4,7 +4,11 @@ import SwiftUI
 struct SessionListView: View {
     let sessions: [ClaudeSession]
     let productivityData: ProductivityData
+    /// Maps a session to its attention level (working / needsYou / hardBlock / dormant).
+    var attentionLevel: (ClaudeSession) -> AttentionLevel = { _ in .dormant }
     var onSessionTap: ((ClaudeSession) -> Void)?
+    /// Marks a session read (drops it to dormant). Used by the hover ✓ button.
+    var onAcknowledge: ((ClaudeSession) -> Void)?
     var onRefresh: (() -> Void)?
     var onSettings: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -16,8 +20,26 @@ struct SessionListView: View {
 
     private let menuFont = Font.system(size: 13)
 
+    /// Display names shared by 2+ sessions (e.g. several sessions in the same
+    /// project). Those rows get a `#pid` tag so they can be told apart.
+    private var duplicateDisplayNames: Set<String> {
+        var seen = Set<String>(), dups = Set<String>()
+        for s in sessions {
+            let name = s.sessionName ?? s.projectName
+            if !seen.insert(name).inserted { dups.insert(name) }
+        }
+        return dups
+    }
+
     private var sortedSessions: [ClaudeSession] {
-        sessions.sortedByStateAndActivity
+        // Surface what needs you first: hardBlock > needsYou > working > dormant,
+        // then most recently active first.
+        sessions.sorted {
+            let l = attentionLevel($0).priority
+            let r = attentionLevel($1).priority
+            if l != r { return l > r }
+            return $0.lastActivityAt > $1.lastActivityAt
+        }
     }
 
     /// Max height for session list: 80% of screen height minus chrome.
@@ -113,7 +135,13 @@ struct SessionListView: View {
                     Button {
                         onSessionTap?(session)
                     } label: {
-                        SessionRowView(session: session, iconStyle: iconStyle)
+                        SessionRowView(
+                            session: session,
+                            iconStyle: iconStyle,
+                            attentionLevel: attentionLevel(session),
+                            showPidTag: duplicateDisplayNames.contains(session.sessionName ?? session.projectName),
+                            onAcknowledge: onAcknowledge.map { ack in { ack(session) } }
+                        )
                     }
                     .buttonStyle(.plain)
                 }

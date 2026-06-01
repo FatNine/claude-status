@@ -11,8 +11,48 @@ import WidgetKit
 @MainActor
 final class SessionMonitor {
 
-    private(set) var sessions: [ClaudeSession] = []
+    private(set) var sessions: [ClaudeSession] = [] {
+        didSet {
+            // Drop acknowledgements for sessions that no longer exist.
+            if !acknowledgedAt.isEmpty {
+                let live = Set(sessions.map(\.id))
+                acknowledgedAt = acknowledgedAt.filter { live.contains($0.key) }
+            }
+        }
+    }
     private(set) var productivityData: ProductivityData = ProductivityData(today: .empty(), allTime: .empty())
+
+    /// How long a finished turn stays "your turn" (orange) before fading to idle.
+    static let idleGraceMinutes: Double = AttentionLevel.defaultGraceMinutes
+
+    /// Sessions the user has marked read, keyed by session ID → the
+    /// `lastActivityAt` at the moment of acknowledgement. A session counts as
+    /// acknowledged while this value is ≥ its current `lastActivityAt`; any new
+    /// activity advances `lastActivityAt` past it and re-raises attention.
+    private var acknowledgedAt: [String: Date] = [:]
+
+    /// Marks a session read, dropping it to dormant until it next does something.
+    func acknowledge(_ session: ClaudeSession) {
+        acknowledgedAt[session.id] = session.lastActivityAt
+    }
+
+    /// The attention level for a single session, applying any acknowledgement.
+    func attentionLevel(for session: ClaudeSession, now: Date = Date()) -> AttentionLevel {
+        session.attentionLevel(
+            now: now,
+            acknowledgedAt: acknowledgedAt[session.id],
+            graceMinutes: Self.idleGraceMinutes
+        )
+    }
+
+    /// The most urgent attention level across all sessions, or nil if none.
+    /// hardBlock > needsYou > working > dormant.
+    var aggregateAttentionLevel: AttentionLevel? {
+        let now = Date()
+        return sessions
+            .map { attentionLevel(for: $0, now: now) }
+            .max(by: { $0.priority < $1.priority })
+    }
 
     /// Whether the Claude Code session-status plugin is installed.
     /// Based on `PluginDetector` checking installed_plugins.json and settings.json hooks.
