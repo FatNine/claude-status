@@ -27,10 +27,8 @@ struct SessionFocuser {
             let axEnabled = UserDefaults(suiteName: "group.com.poisonpenllc.Claude-Status")?
                 .bool(forKey: "axJumpEnabled") ?? false
             if axEnabled, let title = session.desktopTitle, !title.isEmpty {
-                // Small delay so the window is frontmost before we press.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    AXSessionJumper.jump(toTitle: title)
-                }
+                // AXPress doesn't require the app to be frontmost, so jump now.
+                AXSessionJumper.jump(toTitle: title)
             }
         }
     }
@@ -324,50 +322,56 @@ enum AXSessionJumper {
         AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
 
-        if attempt(axApp, title: title) { return }
-        // The web tree builds asynchronously after enabling AX — retry shortly.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            _ = attempt(axApp, title: title)
+        let target = normalize(title)
+        if findAndPress(axApp, target: target, depth: 0) {
+            log("PRESSED \"\(title)\"")
+            return
+        }
+        // The web tree builds asynchronously after enabling AX — retry once.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if findAndPress(axApp, target: target, depth: 0) {
+                log("PRESSED \"\(title)\" (retry)")
+            } else {
+                logDiagnostics(axApp, title: title)
+            }
         }
     }
 
-    @discardableResult
-    private static func attempt(_ axApp: AXUIElement, title: String) -> Bool {
-        let target = normalize(title)
-        var matches: [AXUIElement] = []
-        var sample: [String] = []
-        search(axApp, target: target, depth: 0, matches: &matches, sample: &sample)
-
-        if matches.isEmpty {
-            log("NO MATCH for \"\(title)\" (trusted=\(AXIsProcessTrusted())). \(sample.count) texts sampled:\n"
-                + sample.prefix(120).map { "  • \($0)" }.joined(separator: "\n"))
-            return false
-        }
-        for el in matches where press(el) {
-            log("PRESSED \"\(title)\" (\(matches.count) candidate(s))")
+    /// Depth-first search that presses the first title-matching, pressable
+    /// element and stops — avoids walking the (huge) rest of the tree. Skips
+    /// the menu-bar subtree (native menus, never the session list).
+    private static func findAndPress(_ el: AXUIElement, target: String, depth: Int) -> Bool {
+        if depth > 60 { return false }
+        if let role = copy(el, kAXRoleAttribute) as? String, role == "AXMenuBar" { return false }
+        if let t = text(of: el), isMatch(normalize(t), target), press(el) {
             return true
         }
-        log("FOUND \(matches.count) match(es) for \"\(title)\" but none pressable")
+        for child in children(of: el) where findAndPress(child, target: target, depth: depth + 1) {
+            return true
+        }
         return false
     }
 
-    // MARK: Tree walking
-
-    private static func search(_ el: AXUIElement, target: String, depth: Int,
-                               matches: inout [AXUIElement], sample: inout [String]) {
-        if depth > 60 { return }
-        if let t = text(of: el) {
-            let n = normalize(t)
-            if !n.isEmpty {
-                if sample.count < 250 { sample.append(t) }
-                let fuzzy = n.count > 6 && target.count > 6 && (n.contains(target) || target.contains(n))
-                if n == target || fuzzy { matches.append(el) }
-            }
-        }
-        for child in children(of: el) {
-            search(child, target: target, depth: depth + 1, matches: &matches, sample: &sample)
-        }
+    private static func isMatch(_ n: String, _ target: String) -> Bool {
+        guard !n.isEmpty else { return false }
+        if n == target { return true }
+        return n.count > 6 && target.count > 6 && (n.contains(target) || target.contains(n))
     }
+
+    /// Full tree walk that samples text — only on failure, to aid debugging.
+    private static func logDiagnostics(_ axApp: AXUIElement, title: String) {
+        var sample: [String] = []
+        func walk(_ el: AXUIElement, _ depth: Int) {
+            if depth > 60 || sample.count >= 150 { return }
+            if let t = text(of: el), !t.isEmpty { sample.append(t) }
+            for child in children(of: el) { walk(child, depth + 1) }
+        }
+        walk(axApp, 0)
+        log("NO MATCH for \"\(title)\" (trusted=\(AXIsProcessTrusted())). \(sample.count) texts sampled:\n"
+            + sample.prefix(120).map { "  - \($0)" }.joined(separator: "\n"))
+    }
+
+    // MARK: Tree walking
 
     private static func children(of el: AXUIElement) -> [AXUIElement] {
         copy(el, kAXChildrenAttribute) as? [AXUIElement] ?? []
