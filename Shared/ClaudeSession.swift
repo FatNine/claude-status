@@ -181,6 +181,10 @@ struct ClaudeSession: Identifiable, Codable, Equatable {
     let activity: String
     /// Optional custom session name set by the user via /name-session.
     let sessionName: String?
+    /// Title shown in Claude Desktop's session list (matched by cliSessionId).
+    /// nil for terminal/CLI sessions or before a title is generated.
+    /// `var` with a default so existing initializer call sites keep compiling.
+    var desktopTitle: String? = nil
 
     /// Use sessionId as the SwiftUI identity (stable, unlike PIDs).
     var id: String { sessionId }

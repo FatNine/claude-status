@@ -33,15 +33,16 @@ struct SessionRowView: View {
                 .frame(width: 16, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.sessionName ?? session.projectName)
+                Text(displayName)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
 
                 HStack(spacing: 4) {
-                    if session.sessionName != nil {
+                    if displayName != session.projectName {
                         Text(session.projectName)
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                         Text("\u{2022}")
                             .font(.system(size: 8))
                             .foregroundStyle(.tertiary)
@@ -123,6 +124,12 @@ struct SessionRowView: View {
                 }
             }
         }
+    }
+
+    /// Primary label: manual /name-session, else the Claude Desktop title,
+    /// else the (worktree-aware) project name.
+    private var displayName: String {
+        session.sessionName ?? session.desktopTitle ?? session.projectName
     }
 
     private var dotColor: Color {

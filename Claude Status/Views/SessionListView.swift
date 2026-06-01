@@ -22,10 +22,14 @@ struct SessionListView: View {
 
     /// Display names shared by 2+ sessions (e.g. several sessions in the same
     /// project). Those rows get a `#pid` tag so they can be told apart.
+    private func displayName(_ s: ClaudeSession) -> String {
+        s.sessionName ?? s.desktopTitle ?? s.projectName
+    }
+
     private var duplicateDisplayNames: Set<String> {
         var seen = Set<String>(), dups = Set<String>()
         for s in sessions {
-            let name = s.sessionName ?? s.projectName
+            let name = displayName(s)
             if !seen.insert(name).inserted { dups.insert(name) }
         }
         return dups
@@ -139,7 +143,7 @@ struct SessionListView: View {
                             session: session,
                             iconStyle: iconStyle,
                             attentionLevel: attentionLevel(session),
-                            showPidTag: duplicateDisplayNames.contains(session.sessionName ?? session.projectName),
+                            showPidTag: duplicateDisplayNames.contains(displayName(session)),
                             onAcknowledge: onAcknowledge.map { ack in { ack(session) } }
                         )
                     }

@@ -25,9 +25,21 @@ struct SessionDiscovery {
     /// Keyed by session ID (UUID string from the .cstatus filename).
     var deadSessions: Set<String> = []
 
+    /// Claude Desktop session titles, keyed by `cliSessionId` (== our session ID).
+    /// Refreshed (throttled) each discovery pass so rows can show the same title
+    /// the user sees in Claude Desktop's session list.
+    private var desktopTitles: [String: String] = [:]
+    private var lastTitleScan: Date = .distantPast
+
     private static let claudeProjectsDir: URL = {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/projects")
+    }()
+
+    /// Where Claude Desktop stores per-session metadata (title, cliSessionId, …).
+    private static let claudeDesktopSessionsDir: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
     }()
 
     // MARK: - Discovery
@@ -41,6 +53,7 @@ struct SessionDiscovery {
     /// Full scan: find all .cstatus files, validate PIDs, classify sources.
     /// Returns assembled sessions and updates `deadSessions` for any that are gone.
     mutating func discoverAll() -> DiscoveryResult {
+        refreshDesktopTitlesIfStale()
         let records = scanCStatusFiles()
         var sessions: [ClaudeSession] = []
         var cstatusFiles: [String: URL] = [:]
@@ -62,6 +75,7 @@ struct SessionDiscovery {
     /// Fast refresh: re-read only .cstatus files (no directory enumeration needed
     /// if we already have cached paths). Falls back to full scan.
     mutating func refreshFromCache(_ cache: [String: URL]) -> DiscoveryResult {
+        refreshDesktopTitlesIfStale()
         var sessions: [ClaudeSession] = []
         var cstatusFiles: [String: URL] = [:]
 
@@ -175,6 +189,35 @@ struct SessionDiscovery {
         )
     }
 
+    // MARK: - Claude Desktop Titles
+
+    /// Rescans Claude Desktop's session metadata (throttled to once every few
+    /// seconds) to build a `cliSessionId → title` map. Cheap: ~dozens of small
+    /// JSON files. Failures are non-fatal — titles are best-effort.
+    private mutating func refreshDesktopTitlesIfStale() {
+        guard Date().timeIntervalSince(lastTitleScan) > 4 else { return }
+        lastTitleScan = Date()
+
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: Self.claudeDesktopSessionsDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        var map: [String: String] = [:]
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent.hasPrefix("local_"), url.pathExtension == "json" else { continue }
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cli = obj["cliSessionId"] as? String,
+                  let title = obj["title"] as? String,
+                  !title.isEmpty else { continue }
+            map[cli] = title
+        }
+        desktopTitles = map
+    }
+
     // MARK: - Session Assembly
 
     /// Derives a readable project name from a working directory.
@@ -241,7 +284,8 @@ struct SessionDiscovery {
             tmuxSocket: tmuxSocket,
             source: source,
             activity: record.activity,
-            sessionName: record.sessionName
+            sessionName: record.sessionName,
+            desktopTitle: desktopTitles[record.sessionId]
         )
     }
 
