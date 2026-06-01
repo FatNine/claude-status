@@ -241,16 +241,26 @@ extension ClaudeSession {
             if Self.inputBlockingActivities.contains(activity) { return .hardBlock }
             return .working
         case .waiting:
+            // The daemon's `activity == "question"` comes from a fragile heuristic
+            // (assistant's last paragraph contains '?'), which fires on closing
+            // pleasantries like "anything else?" and then never clears. Treat it
+            // as a soft "your turn" that decays, not a permanent red hard block.
+            // Real blocks (permission / elicitation) keep a different activity.
+            if activity == "question" {
+                return softTurn(now: now, acknowledgedAt: acknowledgedAt, graceMinutes: graceMinutes)
+            }
             return .hardBlock
         case .idle:
-            if let ack = acknowledgedAt, ack >= lastActivityAt {
-                return .dormant
-            }
-            if now.timeIntervalSince(lastActivityAt) <= graceMinutes * 60 {
-                return .needsYou
-            }
-            return .dormant
+            return softTurn(now: now, acknowledgedAt: acknowledgedAt, graceMinutes: graceMinutes)
         }
+    }
+
+    /// A finished turn that's "your turn": `.needsYou` until acknowledged or
+    /// `graceMinutes` pass with no new activity, then `.dormant`.
+    private func softTurn(now: Date, acknowledgedAt: Date?, graceMinutes: Double) -> AttentionLevel {
+        if let ack = acknowledgedAt, ack >= lastActivityAt { return .dormant }
+        if now.timeIntervalSince(lastActivityAt) <= graceMinutes * 60 { return .needsYou }
+        return .dormant
     }
 }
 
