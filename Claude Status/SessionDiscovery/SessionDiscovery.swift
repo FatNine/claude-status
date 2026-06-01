@@ -29,6 +29,10 @@ struct SessionDiscovery {
     /// Refreshed (throttled) each discovery pass so rows can show the same title
     /// the user sees in Claude Desktop's session list.
     private var desktopTitles: [String: String] = [:]
+    /// Same titles keyed by `cwd` — fallback for when a session was resumed and
+    /// got a new cli UUID that no longer matches the stored cliSessionId, but the
+    /// working directory is stable. Most-recently-active record wins per cwd.
+    private var desktopTitlesByCwd: [String: String] = [:]
     private var lastTitleScan: Date = .distantPast
 
     private static let claudeProjectsDir: URL = {
@@ -205,17 +209,28 @@ struct SessionDiscovery {
             options: [.skipsHiddenFiles]
         ) else { return }
 
-        var map: [String: String] = [:]
+        var byCli: [String: String] = [:]
+        var byCwd: [String: String] = [:]
+        var cwdRecency: [String: Double] = [:]
         for case let url as URL in enumerator {
             guard url.lastPathComponent.hasPrefix("local_"), url.pathExtension == "json" else { continue }
             guard let data = try? Data(contentsOf: url),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let cli = obj["cliSessionId"] as? String,
                   let title = obj["title"] as? String,
                   !title.isEmpty else { continue }
-            map[cli] = title
+            if let cli = obj["cliSessionId"] as? String, !cli.isEmpty {
+                byCli[cli] = title
+            }
+            if let cwd = (obj["cwd"] as? String) ?? (obj["worktreePath"] as? String), !cwd.isEmpty {
+                let ts = (obj["lastActivityAt"] as? NSNumber)?.doubleValue ?? 0
+                if ts >= (cwdRecency[cwd] ?? -1) {
+                    byCwd[cwd] = title
+                    cwdRecency[cwd] = ts
+                }
+            }
         }
-        desktopTitles = map
+        desktopTitles = byCli
+        desktopTitlesByCwd = byCwd
     }
 
     // MARK: - Session Assembly
@@ -285,7 +300,7 @@ struct SessionDiscovery {
             source: source,
             activity: record.activity,
             sessionName: record.sessionName,
-            desktopTitle: desktopTitles[record.sessionId]
+            desktopTitle: desktopTitles[record.sessionId] ?? desktopTitlesByCwd[record.cwd]
         )
     }
 
