@@ -563,8 +563,10 @@ private struct PopoverContentView: View {
             sessions: monitor.sessions,
             productivityData: monitor.productivityData,
             attentionLevel: { monitor.attentionLevel(for: $0) },
+            category: { monitor.category(for: $0) },
             onSessionTap: onSessionTap,
             onAcknowledge: { monitor.acknowledge($0) },
+            onToggleCategory: { monitor.toggleCategory(for: $0) },
             onRefresh: onRefresh,
             onSettings: onSettings,
             onQuit: onQuit

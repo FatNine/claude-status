@@ -9,7 +9,7 @@ struct SessionFocuser {
     func focus(session: ClaudeSession) {
         switch session.source {
         case .terminal(let app):
-            focusTerminal(app: app, sessionId: session.iTermSessionId, tmuxPaneId: session.tmuxPaneId, tmuxSocket: session.tmuxSocket, workingDirectory: session.workingDirectory)
+            focusTerminal(app: app, sessionId: session.iTermSessionId, tty: session.tty, tmuxPaneId: session.tmuxPaneId, tmuxSocket: session.tmuxSocket, workingDirectory: session.workingDirectory)
         case .xcode:
             activateApp(bundleId: "com.apple.dt.Xcode")
         case .vscode:
@@ -19,6 +19,10 @@ struct SessionFocuser {
         
         case .zed:
             activateApp(bundleId: "dev.zed.Zed")
+        case .agent:
+            // Headless / programmatically-spawned session — there's no window
+            // or app to focus, so clicking does nothing.
+            break
         case .claudeDesktop:
             // Bring Claude Desktop to the front. There's no public deep link to
             // select a specific code session, so when the user opts in (and has
@@ -69,7 +73,7 @@ struct SessionFocuser {
         "Ghostty": "com.mitchellh.ghostty",
     ]
 
-    private func focusTerminal(app: String, sessionId: String?, tmuxPaneId: String?, tmuxSocket: String?, workingDirectory: String) {
+    private func focusTerminal(app: String, sessionId: String?, tty: String?, tmuxPaneId: String?, tmuxSocket: String?, workingDirectory: String) {
         // tmux sessions: select the pane/window then activate the terminal
         if let paneId = tmuxPaneId {
             focusTmuxPane(paneId: paneId, socket: tmuxSocket)
@@ -98,8 +102,35 @@ struct SessionFocuser {
             return
         }
 
+        // Terminal.app: select the exact tab/window by its tty, so multiple
+        // sessions don't all just raise the frontmost window.
+        if app == "Terminal", let tty {
+            focusTerminalAppTab(tty: tty)
+            return
+        }
+
         // For other terminals, just activate the app
         activateTerminalApp(name: app)
+    }
+
+    /// Selects the Terminal.app window/tab whose tty matches and brings it front.
+    private func focusTerminalAppTab(tty: String) {
+        let dev = appleScriptEscape("/dev/\(tty)")
+        let script = """
+        tell application "Terminal"
+            activate
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "\(dev)" then
+                        set selected of t to true
+                        set index of w to 1
+                        return
+                    end if
+                end repeat
+            end repeat
+        end tell
+        """
+        runAppleScript(script)
     }
 
     /// Activates a terminal app by bundle ID, falling back to name matching.

@@ -45,13 +45,50 @@ final class SessionMonitor {
         )
     }
 
-    /// The most urgent attention level across all sessions, or nil if none.
-    /// hardBlock > needsYou > working > dormant.
+    /// The most urgent attention level across **foreground** sessions, or nil.
+    /// Background agents are intentionally excluded — they must not drive the
+    /// menu-bar light. hardBlock > needsYou > working > dormant.
     var aggregateAttentionLevel: AttentionLevel? {
         let now = Date()
         return sessions
+            .filter { category(for: $0) == .foreground }
             .map { attentionLevel(for: $0, now: now) }
             .max(by: { $0.priority < $1.priority })
+    }
+
+    // MARK: - Foreground / background categorization
+
+    private static let categoryOverridesKey = "sessionCategoryOverrides"
+
+    /// Per-cwd manual overrides: cwd → "fg" / "bg". Persisted (app group) since
+    /// session IDs churn but the working directory is stable. Lets the user
+    /// correct the heuristic (promote a misdetected agent, or push a noisy
+    /// terminal session into the background group).
+    private var categoryOverrides: [String: String] = [:]
+
+    private var sharedDefaults: UserDefaults? {
+        UserDefaults(suiteName: "group.com.poisonpenllc.Claude-Status")
+    }
+
+    /// The session's category: its detected source, unless the user overrode it.
+    func category(for session: ClaudeSession) -> SessionCategory {
+        if let o = categoryOverrides[session.workingDirectory] {
+            return o == "bg" ? .backgroundAgent : .foreground
+        }
+        return session.source == .agent ? .backgroundAgent : .foreground
+    }
+
+    /// Toggles a session (by its cwd) between foreground and background.
+    func toggleCategory(for session: ClaudeSession) {
+        let target: SessionCategory = category(for: session) == .foreground ? .backgroundAgent : .foreground
+        // If the override matches the natural detection, drop it; else store it.
+        let natural: SessionCategory = session.source == .agent ? .backgroundAgent : .foreground
+        if target == natural {
+            categoryOverrides.removeValue(forKey: session.workingDirectory)
+        } else {
+            categoryOverrides[session.workingDirectory] = target == .backgroundAgent ? "bg" : "fg"
+        }
+        sharedDefaults?.set(categoryOverrides, forKey: Self.categoryOverridesKey)
     }
 
     /// Whether the Claude Code session-status plugin is installed.
@@ -88,6 +125,9 @@ final class SessionMonitor {
 
     init(scanInterval: TimeInterval = 5.0) {
         self.scanInterval = scanInterval
+        self.categoryOverrides =
+            (UserDefaults(suiteName: "group.com.poisonpenllc.Claude-Status")?
+                .dictionary(forKey: Self.categoryOverridesKey) as? [String: String]) ?? [:]
         self.discovery = SessionDiscovery()
         self.stateResolver = StateResolver()
         self.pluginDetector = PluginDetector()

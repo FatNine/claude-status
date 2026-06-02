@@ -6,9 +6,13 @@ struct SessionListView: View {
     let productivityData: ProductivityData
     /// Maps a session to its attention level (working / needsYou / hardBlock / dormant).
     var attentionLevel: (ClaudeSession) -> AttentionLevel = { _ in .dormant }
+    /// Foreground vs background-agent. Background agents are folded away.
+    var category: (ClaudeSession) -> SessionCategory = { _ in .foreground }
     var onSessionTap: ((ClaudeSession) -> Void)?
     /// Marks a session read (drops it to dormant). Used by the hover ✓ button.
     var onAcknowledge: ((ClaudeSession) -> Void)?
+    /// Moves a session between foreground and the background-agent group.
+    var onToggleCategory: ((ClaudeSession) -> Void)?
     var onRefresh: (() -> Void)?
     var onSettings: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -17,6 +21,7 @@ struct SessionListView: View {
     private var iconStyle: SessionIconStyle = .emoji
 
     @State private var isRefreshing = false
+    @State private var showBackground = false
 
     private let menuFont = Font.system(size: 13)
 
@@ -46,6 +51,14 @@ struct SessionListView: View {
         }
     }
 
+    private var foregroundSessions: [ClaudeSession] {
+        sortedSessions.filter { category($0) == .foreground }
+    }
+
+    private var backgroundSessions: [ClaudeSession] {
+        sortedSessions.filter { category($0) == .backgroundAgent }
+    }
+
     /// Max height for session list: 80% of screen height minus chrome.
     private var maxSessionListHeight: CGFloat {
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
@@ -58,7 +71,7 @@ struct SessionListView: View {
             header
             Divider()
 
-            if sessions.isEmpty {
+            if foregroundSessions.isEmpty && backgroundSessions.isEmpty {
                 emptyState
             } else {
                 sessionList
@@ -135,25 +148,68 @@ struct SessionListView: View {
     private var sessionList: some View {
         ScrollView {
             VStack(spacing: 0) {
-                ForEach(sortedSessions) { session in
-                    Button {
-                        onSessionTap?(session)
-                    } label: {
-                        SessionRowView(
-                            session: session,
-                            iconStyle: iconStyle,
-                            attentionLevel: attentionLevel(session),
-                            showPidTag: duplicateDisplayNames.contains(displayName(session)),
-                            onAcknowledge: onAcknowledge.map { ack in { ack(session) } }
-                        )
-                    }
-                    .buttonStyle(.plain)
+                ForEach(foregroundSessions) { rowButton($0) }
+                if !backgroundSessions.isEmpty {
+                    backgroundDisclosure
                 }
             }
             .padding(.vertical, 4)
         }
         .frame(maxHeight: maxSessionListHeight)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private func rowButton(_ session: ClaudeSession) -> some View {
+        Button {
+            onSessionTap?(session)
+        } label: {
+            SessionRowView(
+                session: session,
+                iconStyle: iconStyle,
+                attentionLevel: attentionLevel(session),
+                showPidTag: duplicateDisplayNames.contains(displayName(session)),
+                onAcknowledge: onAcknowledge.map { ack in { ack(session) } }
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(category(session) == .foreground ? "Move to Background" : "Move to Foreground") {
+                onToggleCategory?(session)
+            }
+        }
+    }
+
+    /// Collapsible "Background (N)" group for headless / agent sessions.
+    private var backgroundDisclosure: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { showBackground.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: showBackground ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Text("Background")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("\(backgroundSessions.count)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Headless / programmatically-spawned sessions (no window to focus)")
+
+            if showBackground {
+                ForEach(backgroundSessions) { rowButton($0) }
+            }
+        }
     }
 
     private var productivitySection: some View {

@@ -59,7 +59,7 @@ struct SessionDiscovery {
     mutating func discoverAll() -> DiscoveryResult {
         refreshDesktopTitlesIfStale()
         let records = scanCStatusFiles()
-        var sessions: [ClaudeSession] = []
+        var alive: [CStatusRecord] = []
         var cstatusFiles: [String: URL] = [:]
 
         for record in records {
@@ -70,17 +70,17 @@ struct SessionDiscovery {
                 deadSessions.insert(record.sessionId)
                 continue
             }
-            sessions.append(assembleSession(from: record))
             cstatusFiles[record.sessionId] = record.fileURL
+            alive.append(record)
         }
-        return DiscoveryResult(sessions: sessions, cstatusFiles: cstatusFiles)
+        return DiscoveryResult(sessions: collapseAndAssemble(alive), cstatusFiles: cstatusFiles)
     }
 
     /// Fast refresh: re-read only .cstatus files (no directory enumeration needed
     /// if we already have cached paths). Falls back to full scan.
     mutating func refreshFromCache(_ cache: [String: URL]) -> DiscoveryResult {
         refreshDesktopTitlesIfStale()
-        var sessions: [ClaudeSession] = []
+        var alive: [CStatusRecord] = []
         var cstatusFiles: [String: URL] = [:]
 
         for (sessionId, url) in cache {
@@ -95,10 +95,10 @@ struct SessionDiscovery {
                 deadSessions.insert(record.sessionId)
                 continue
             }
-            sessions.append(assembleSession(from: record))
             cstatusFiles[record.sessionId] = record.fileURL
+            alive.append(record)
         }
-        return DiscoveryResult(sessions: sessions, cstatusFiles: cstatusFiles)
+        return DiscoveryResult(sessions: collapseAndAssemble(alive), cstatusFiles: cstatusFiles)
     }
 
     /// Clears the dead session list (e.g. after a Darwin notification
@@ -286,6 +286,7 @@ struct SessionDiscovery {
             tmuxPaneId = nil
             tmuxSocket = nil
         }
+        let tty: String? = source.isTerminal ? controllingTTY(for: record.pid) : nil
 
         return ClaudeSession(
             sessionId: record.sessionId,
@@ -295,6 +296,7 @@ struct SessionDiscovery {
             state: record.state,
             lastActivityAt: record.timestamp,
             iTermSessionId: iTermSessionId,
+            tty: tty,
             tmuxPaneId: tmuxPaneId,
             tmuxSocket: tmuxSocket,
             source: source,
@@ -305,6 +307,53 @@ struct SessionDiscovery {
     }
 
     // MARK: - Process Validation
+
+    /// Assembles sessions, dropping Claude Code's internal `--bg-spare` pool
+    /// workers entirely. They are pre-forked plumbing, never the user's session;
+    /// the real interactive session is tracked separately (the UserPromptSubmit
+    /// hook), so unlike before we no longer need to keep a spare as a stand-in.
+    private func collapseAndAssemble(_ records: [CStatusRecord]) -> [ClaudeSession] {
+        records.compactMap { record in
+            if isBackgroundSpare(pid: record.pid) { return nil }
+            return assembleSession(from: record)
+        }
+    }
+
+    /// True if the process is a Claude Code background spare-pool worker.
+    private func isBackgroundSpare(pid: pid_t) -> Bool {
+        processArguments(for: pid).contains("--bg-spare")
+    }
+
+    /// Reads a process's argv (not env) from sysctl KERN_PROCARGS2.
+    private func processArguments(for pid: pid_t) -> [String] {
+        var argmax: Int32 = 0
+        var mib: [Int32] = [CTL_KERN, KERN_ARGMAX]
+        var size = MemoryLayout<Int32>.size
+        guard sysctl(&mib, 2, &argmax, &size, nil, 0) == 0, argmax > 0 else { return [] }
+
+        var procargs = [UInt8](repeating: 0, count: Int(argmax))
+        mib = [CTL_KERN, KERN_PROCARGS2, pid]
+        size = Int(argmax)
+        guard sysctl(&mib, 3, &procargs, &size, nil, 0) == 0, size > 0 else { return [] }
+
+        var offset = MemoryLayout<Int32>.size
+        // Skip the executable path and trailing padding nulls.
+        while offset < size && procargs[offset] != 0 { offset += 1 }
+        while offset < size && procargs[offset] == 0 { offset += 1 }
+
+        // Collect exactly argc argument strings (stop before the environment).
+        let argc = procargs.withUnsafeBytes { $0.load(as: Int32.self) }
+        var args: [String] = []
+        for _ in 0..<argc {
+            let start = offset
+            while offset < size && procargs[offset] != 0 { offset += 1 }
+            if start < offset, let s = String(bytes: procargs[start..<offset], encoding: .utf8) {
+                args.append(s)
+            }
+            offset += 1
+        }
+        return args
+    }
 
     /// Checks if a process is still alive and is a Claude-related process.
     /// Uses kill(pid, 0) for liveness, then verifies the executable path
@@ -421,7 +470,10 @@ struct SessionDiscovery {
             return .terminal(app: app)
         }
 
-        return .terminal(app: "Terminal")
+        // No focusable host found anywhere in the process tree (and not tmux,
+        // not a known terminal env) — this is a headless / programmatically
+        // spawned session (e.g. an Erlang/erlexec harness). Mark it as an agent.
+        return .agent
     }
 
     /// Identifies the real terminal app when running inside tmux.
@@ -512,6 +564,30 @@ struct SessionDiscovery {
         guard result == size else { return nil }
         let ppid = pid_t(info.pbi_ppid)
         return ppid > 1 ? ppid : nil
+    }
+
+    /// The controlling terminal name (e.g. "ttys008") for a process, walking up
+    /// the ancestor chain since the Claude process itself may have no tty while
+    /// the shell that owns the Terminal tab does.
+    private func controllingTTY(for pid: pid_t) -> String? {
+        var current = pid
+        for _ in 0..<8 {
+            if let tty = ttyName(of: current) { return tty }
+            guard let pp = parentPid(for: current), pp > 1 else { break }
+            current = pp
+        }
+        return nil
+    }
+
+    private func ttyName(of pid: pid_t) -> String? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        let dev = info.e_tdev
+        guard dev != 0, dev != UInt32.max else { return nil } // no controlling tty
+        guard let cstr = devname(dev_t(bitPattern: dev), mode_t(S_IFCHR)) else { return nil }
+        let name = String(cString: cstr)
+        return (name.isEmpty || name == "??") ? nil : name
     }
 
     /// Reads an environment variable from a running process via sysctl KERN_PROCARGS2.

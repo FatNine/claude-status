@@ -136,6 +136,7 @@ enum SessionSource: Codable, Equatable {
     case jetbrains(ide: String)  // e.g. "PyCharm", "IntelliJ IDEA"
     case zed
     case claudeDesktop  // Claude Desktop's built-in code mode (embedded claude-code)
+    case agent  // Headless / programmatically-spawned claude with no focusable host
 
     var label: String {
         switch self {
@@ -145,6 +146,7 @@ enum SessionSource: Codable, Equatable {
         case .jetbrains(let ide): ide
         case .zed: "Zed"
         case .claudeDesktop: "Claude"
+        case .agent: "Agent"
         }
     }
 
@@ -161,6 +163,17 @@ enum SessionSource: Codable, Equatable {
     }
 }
 
+/// How a session is treated in the UI. Foreground sessions are the ones you
+/// personally attend (a terminal window, IDE, Claude Desktop) — they fill the
+/// main list and drive the menu-bar light. Background agents are headless /
+/// programmatically-spawned sessions (e.g. an Erlang/erlexec harness) with no
+/// window to focus; they're folded away and excluded from the aggregate light.
+/// Claude Code's own `--bg-spare` pool workers are dropped before this point.
+enum SessionCategory: Equatable {
+    case foreground
+    case backgroundAgent
+}
+
 /// A discovered Claude Code session on the local machine.
 struct ClaudeSession: Identifiable, Codable, Equatable {
     /// The session UUID from Claude Code (stable across refreshes).
@@ -171,6 +184,10 @@ struct ClaudeSession: Identifiable, Codable, Equatable {
     let state: SessionState
     let lastActivityAt: Date
     let iTermSessionId: String?
+    /// Controlling terminal device name (e.g. "ttys008"), used to focus the
+    /// right Terminal.app tab. `var` with a default so existing initializer
+    /// call sites keep compiling.
+    var tty: String? = nil
     /// tmux pane ID (e.g. "%5") when session runs inside tmux.
     let tmuxPaneId: String?
     /// tmux socket path for targeting the correct server.
