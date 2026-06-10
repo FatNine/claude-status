@@ -210,8 +210,7 @@ struct SessionDiscovery {
         ) else { return }
 
         var byCli: [String: String] = [:]
-        var byCwd: [String: String] = [:]
-        var cwdRecency: [String: Double] = [:]
+        var cwdTitles: [String: Set<String>] = [:]
         for case let url as URL in enumerator {
             guard url.lastPathComponent.hasPrefix("local_"), url.pathExtension == "json" else { continue }
             guard let data = try? Data(contentsOf: url),
@@ -222,15 +221,15 @@ struct SessionDiscovery {
                 byCli[cli] = title
             }
             if let cwd = (obj["cwd"] as? String) ?? (obj["worktreePath"] as? String), !cwd.isEmpty {
-                let ts = (obj["lastActivityAt"] as? NSNumber)?.doubleValue ?? 0
-                if ts >= (cwdRecency[cwd] ?? -1) {
-                    byCwd[cwd] = title
-                    cwdRecency[cwd] = ts
-                }
+                cwdTitles[cwd, default: []].insert(title)
             }
         }
         desktopTitles = byCli
-        desktopTitlesByCwd = byCwd
+        // The cwd fallback (for resumed sessions whose cli id no longer matches)
+        // is only safe when a directory maps to a single title. A busy dir with
+        // many distinct sessions (e.g. ~/.openclaw) can't pick one, so skip it —
+        // otherwise every untracked session there gets mislabeled with one title.
+        desktopTitlesByCwd = cwdTitles.compactMapValues { $0.count == 1 ? $0.first : nil }
     }
 
     // MARK: - Session Assembly
@@ -309,14 +308,19 @@ struct SessionDiscovery {
     // MARK: - Process Validation
 
     /// Assembles sessions, dropping Claude Code's internal `--bg-spare` pool
-    /// workers entirely. They are pre-forked plumbing, never the user's session;
-    /// the real interactive session is tracked separately (the UserPromptSubmit
-    /// hook), so unlike before we no longer need to keep a spare as a stand-in.
+    /// workers, and de-duplicating resumed sessions: when a process resumes it
+    /// gets a new session id but the same pid, leaving its old session id's
+    /// .cstatus behind as a stale ghost row. Among records sharing a pid we keep
+    /// only the most-recently-updated one (the current conversation).
     private func collapseAndAssemble(_ records: [CStatusRecord]) -> [ClaudeSession] {
-        records.compactMap { record in
-            if isBackgroundSpare(pid: record.pid) { return nil }
-            return assembleSession(from: record)
+        var newestByPid: [pid_t: CStatusRecord] = [:]
+        for record in records where !isBackgroundSpare(pid: record.pid) {
+            if let existing = newestByPid[record.pid], existing.timestamp >= record.timestamp {
+                continue
+            }
+            newestByPid[record.pid] = record
         }
+        return newestByPid.values.map { assembleSession(from: $0) }
     }
 
     /// True if the process is a Claude Code background spare-pool worker.
